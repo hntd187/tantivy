@@ -1,5 +1,5 @@
 use super::compress;
-use super::skiplist::SkipListBuilder;
+use super::index::SkipIndexBuilder;
 use super::StoreReader;
 use crate::common::CountingWriter;
 use crate::common::{BinarySerializable, VInt};
@@ -21,7 +21,7 @@ const BLOCK_SIZE: usize = 16_384;
 ///
 pub struct StoreWriter {
     doc: DocId,
-    offset_index_writer: SkipListBuilder<u64>,
+    offset_index_writer: SkipIndexBuilder,
     writer: CountingWriter<WritePtr>,
     intermediary_buffer: Vec<u8>,
     current_block: Vec<u8>,
@@ -35,7 +35,7 @@ impl StoreWriter {
     pub fn new(writer: WritePtr) -> StoreWriter {
         StoreWriter {
             doc: 0,
-            offset_index_writer: SkipListBuilder::new(4),
+            offset_index_writer: SkipIndexBuilder::new(),
             writer: CountingWriter::wrap(writer),
             intermediary_buffer: Vec::new(),
             current_block: Vec::new(),
@@ -69,7 +69,7 @@ impl StoreWriter {
         if !self.current_block.is_empty() {
             self.write_and_compress_block()?;
             self.offset_index_writer
-                .insert(u64::from(self.doc), &(self.writer.written_bytes() as u64))?;
+                .insert(self.doc, self.writer.written_bytes());
         }
         let doc_offset = self.doc;
         let start_offset = self.writer.written_bytes() as u64;
@@ -80,10 +80,10 @@ impl StoreWriter {
 
         // concatenate the index of the `store_reader`, after translating
         // its start doc id and its start file offset.
-        for (next_doc_id, block_addr) in store_reader.block_index() {
+        for (next_doc_id, block_addr) in store_reader.iter_blocks() {
             self.doc = doc_offset + next_doc_id as u32;
             self.offset_index_writer
-                .insert(u64::from(self.doc), &(start_offset + block_addr))?;
+                .insert(self.doc, start_offset + block_addr);
         }
         Ok(())
     }
@@ -94,7 +94,7 @@ impl StoreWriter {
         (self.intermediary_buffer.len() as u32).serialize(&mut self.writer)?;
         self.writer.write_all(&self.intermediary_buffer)?;
         self.offset_index_writer
-            .insert(u64::from(self.doc), &(self.writer.written_bytes() as u64))?;
+            .insert(self.doc, self.writer.written_bytes());
         self.current_block.clear();
         Ok(())
     }
@@ -110,7 +110,6 @@ impl StoreWriter {
         let header_offset: u64 = self.writer.written_bytes() as u64;
         self.offset_index_writer.write(&mut self.writer)?;
         header_offset.serialize(&mut self.writer)?;
-        self.doc.serialize(&mut self.writer)?;
         self.writer.terminate()
     }
 }
