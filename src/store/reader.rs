@@ -40,12 +40,8 @@ impl StoreReader {
         self.skip_index.cursor()
     }
 
-    fn block_offset(&self, doc_id: DocId) -> (DocId, u64) {
-        self.skip_index
-            .cursor()
-            .seek(doc_id + 1u32)
-            .map(|(doc, offset)| (doc, offset))
-            .unwrap_or((0u32, 0u64))
+    fn block_offset(&self, doc_id: DocId) -> Option<(DocId, u64)> {
+        self.skip_index.seek(doc_id)
     }
 
     pub(crate) fn block_data(&self) -> io::Result<OwnedBytes> {
@@ -77,7 +73,8 @@ impl StoreReader {
     /// It should not be called to score documents
     /// for instance.
     pub fn get(&self, doc_id: DocId) -> crate::Result<Document> {
-        let (first_doc_id, block_offset) = self.block_offset(doc_id);
+        let (first_doc_id, block_offset) = self.block_offset(doc_id).unwrap(); // TODO
+                                                                               // .ok_or_else(err)?;
         self.read_block(block_offset as usize)?;
         let current_block_mut = self.current_block.borrow_mut();
         let mut cursor = &current_block_mut[..];

@@ -80,21 +80,22 @@ impl StoreWriter {
 
         // concatenate the index of the `store_reader`, after translating
         // its start doc id and its start file offset.
-        for (next_doc_id, block_addr) in store_reader.iter_blocks() {
-            self.doc = doc_offset + next_doc_id as u32;
+        for (last_doc_in_block, block_addr) in store_reader.iter_blocks() {
+            self.doc = doc_offset + last_doc_in_block as u32;
             self.offset_index_writer
                 .insert(self.doc, start_offset + block_addr);
         }
+        self.doc += 1;
         Ok(())
     }
 
     fn write_and_compress_block(&mut self) -> io::Result<()> {
         self.intermediary_buffer.clear();
         compress(&self.current_block[..], &mut self.intermediary_buffer)?;
+        let block_offset = self.writer.written_bytes();
         (self.intermediary_buffer.len() as u32).serialize(&mut self.writer)?;
         self.writer.write_all(&self.intermediary_buffer)?;
-        self.offset_index_writer
-            .insert(self.doc, self.writer.written_bytes());
+        self.offset_index_writer.insert(self.doc - 1, block_offset);
         self.current_block.clear();
         Ok(())
     }
