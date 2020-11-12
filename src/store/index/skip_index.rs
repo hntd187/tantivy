@@ -1,5 +1,6 @@
 use crate::common::{BinarySerializable, VInt};
 use crate::directory::OwnedBytes;
+use crate::store::index::Checkpoint;
 use crate::store::index::block::Block;
 use crate::DocId;
 
@@ -20,9 +21,10 @@ impl<'a> LayerCursor<'a> {
 }
 
 impl<'a> Iterator for LayerCursor<'a> {
-    type Item = (DocId, (u64, u64));
 
-    fn next(&mut self) -> Option<(DocId, (u64, u64))> {
+    type Item = Checkpoint;
+
+    fn next(&mut self) -> Option<Checkpoint> {
         if self.cursor == self.block.len() {
             if self.remaining.is_empty() {
                 return None;
@@ -60,18 +62,11 @@ impl Layer {
     fn seek_start_at_offset(
         &self,
         target: DocId,
-        mut first_doc_in_block: u32,
         offset: u64,
-    ) -> Option<(DocId, (u64, u64))> {
-        let cursor = self.cursor_at_offset(offset);
-        for (last_doc_in_block, block_offset) in cursor {
-            if last_doc_in_block >= target {
-                return Some((first_doc_in_block, block_offset));
-            } else {
-                first_doc_in_block = last_doc_in_block + 1;
-            }
-        }
-        None
+    ) -> Option<Checkpoint> {
+        self.cursor_at_offset(offset)
+            .filter(|checkpoint| checkpoint.last_doc >= target)
+            .next()
     }
 }
 
@@ -87,25 +82,28 @@ impl SkipIndex {
             .unwrap_or_else(LayerCursor::empty)
     }
 
-    pub fn seek(&self, target: DocId) -> Option<(DocId, (u64, u64))> {
-        let mut first_doc: u32 = 0;
+    pub fn seek(&self, target: DocId) -> Option<Checkpoint> {
         let first_layer_len = self
             .layers
             .first()
             .map(|layer| layer.data.len() as u64)
             .unwrap_or(0u64);
-        let mut start_end_offset = (0u64, first_layer_len);
+        let mut cur_checkpoint = Checkpoint {
+            first_doc: 0u32,
+            last_doc: 0u32,
+            start_offset: 0u64,
+            end_offset: first_layer_len
+        };
         for layer in &self.layers {
-            if let Some((first_doc_in_block, block_start_end_offset)) =
-                layer.seek_start_at_offset(target, first_doc, start_end_offset.0)
+            if let Some(checkpoint) =
+                layer.seek_start_at_offset(target, cur_checkpoint.start_offset)
             {
-                first_doc = first_doc_in_block;
-                start_end_offset = block_start_end_offset;
+                cur_checkpoint = checkpoint;
             } else {
                 return None;
             }
         }
-        Some((first_doc, start_end_offset))
+        Some(cur_checkpoint)
     }
 }
 

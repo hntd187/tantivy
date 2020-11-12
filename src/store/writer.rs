@@ -7,6 +7,7 @@ use crate::directory::TerminatingWrite;
 use crate::directory::WritePtr;
 use crate::schema::Document;
 use crate::DocId;
+use crate::store::index::Checkpoint;
 use std::io::{self, Write};
 
 const BLOCK_SIZE: usize = 16_384;
@@ -21,6 +22,7 @@ const BLOCK_SIZE: usize = 16_384;
 ///
 pub struct StoreWriter {
     doc: DocId,
+    first_doc_in_block: DocId,
     offset_index_writer: SkipIndexBuilder,
     writer: CountingWriter<WritePtr>,
     intermediary_buffer: Vec<u8>,
@@ -35,6 +37,7 @@ impl StoreWriter {
     pub fn new(writer: WritePtr) -> StoreWriter {
         StoreWriter {
             doc: 0,
+            first_doc_in_block: 0,
             offset_index_writer: SkipIndexBuilder::new(),
             writer: CountingWriter::wrap(writer),
             intermediary_buffer: Vec::new(),
@@ -78,16 +81,13 @@ impl StoreWriter {
 
         // concatenate the index of the `store_reader`, after translating
         // its start doc id and its start file offset.
-        for (last_doc_in_block, (block_start_offset, block_end_offset)) in
-            store_reader.iter_blocks()
-        {
-            let last_doc = doc_shift + last_doc_in_block as u32;
-            self.offset_index_writer.insert(
-                last_doc,
-                start_shift + block_start_offset,
-                start_shift + block_end_offset,
-            );
-            self.doc = last_doc + 1;
+        for mut checkpoint in store_reader.iter_blocks() {
+            checkpoint.first_doc += doc_shift;
+            checkpoint.last_doc += doc_shift;
+            checkpoint.start_offset += start_shift;
+            checkpoint.end_offset += start_shift;
+            self.offset_index_writer.insert(checkpoint);
+            self.doc = checkpoint.last_doc + 1;
         }
         Ok(())
     }
@@ -99,10 +99,16 @@ impl StoreWriter {
         let start_offset = self.writer.written_bytes();
         self.writer.write_all(&self.intermediary_buffer)?;
         let end_offset = self.writer.written_bytes();
-        let last_doc_in_block = self.doc - 1;
+        let last_doc = self.doc - 1;
         self.offset_index_writer
-            .insert(last_doc_in_block, start_offset, end_offset);
+            .insert(Checkpoint {
+                first_doc: self.first_doc_in_block,
+                last_doc,
+                start_offset,
+                end_offset
+            });
         self.current_block.clear();
+        self.first_doc_in_block = self.doc;
         Ok(())
     }
 

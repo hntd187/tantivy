@@ -1,104 +1,98 @@
 use crate::common::VInt;
-use crate::store::index::PERIOD;
+use crate::store::index::{Checkpoint, PERIOD};
 use crate::DocId;
 use std::io;
 
 pub struct Block {
-    pub doc_offsets: Vec<(DocId, u64)>,
-    pub last_block_len: u64,
+    pub checkpoints: Vec<Checkpoint>,
 }
 
 impl Default for Block {
     fn default() -> Block {
         Block {
-            doc_offsets: Vec::with_capacity(PERIOD),
-            last_block_len: 0u64,
+            checkpoints: Vec::with_capacity(PERIOD),
         }
     }
 }
 
 impl Block {
-    pub fn last_doc(&self) -> Option<DocId> {
-        self.doc_offsets
+    pub fn first_last_doc(&self) -> Option<(DocId, DocId)> {
+        let first_doc_opt = self.checkpoints
             .last()
             .cloned()
-            .map(|(last_doc, _)| last_doc)
+            .map(|checkpoint| checkpoint.first_doc);
+        let last_doc_opt = self.checkpoints
+            .last()
+            .cloned()
+            .map(|checkpoint| checkpoint.last_doc);
+        match (first_doc_opt, last_doc_opt) {
+            (Some(first_doc), Some(last_doc)) => {
+                Some((first_doc, last_doc))
+            },
+            _ => None
+        }
     }
 
-    pub fn push(&mut self, doc: DocId, start_offset: u64, end_offset: u64) {
-        self.doc_offsets.push((doc, start_offset));
-        self.last_block_len = end_offset - start_offset;
+    pub fn push(&mut self, checkpoint: Checkpoint) {
+        self.checkpoints.push(checkpoint);
     }
 
     pub fn len(&self) -> usize {
-        self.doc_offsets.len()
+        self.checkpoints.len()
     }
 
-    pub fn get(&self, idx: usize) -> (u32, (u64, u64)) {
-        let (first_doc, start_offset) = self.doc_offsets[idx];
-        if self.doc_offsets.len() > idx + 1 {
-            let end_offset = self.doc_offsets[idx + 1].1;
-            (first_doc, (start_offset, end_offset))
-        } else {
-            (
-                first_doc,
-                (start_offset, start_offset + self.last_block_len),
-            )
-        }
+    pub fn get(&self, idx: usize) -> Checkpoint {
+        self.checkpoints[idx]
     }
 
     pub fn clear(&mut self) {
-        self.doc_offsets.clear();
+        self.checkpoints.clear();
     }
 
     pub fn serialize(&mut self, buffer: &mut Vec<u8>) {
-        assert!(self.doc_offsets.len() < 256);
-        buffer.push(self.doc_offsets.len() as u8);
-        if let Some((doc, val)) = self.doc_offsets.first().cloned() {
-            VInt(doc as u64).serialize_into_vec(buffer);
-            VInt(val).serialize_into_vec(buffer);
-        } else {
+        VInt(self.checkpoints.len() as u64).serialize_into_vec(buffer);
+        if self.checkpoints.is_empty() {
             return;
         }
-        for i in 1..self.doc_offsets.len() {
-            let (prev_doc, prev_val) = self.doc_offsets[i - 1];
-            let (doc, val) = self.doc_offsets[i];
-            let delta_doc = doc - prev_doc;
-            let delta_val = val - prev_val;
+        VInt(self.checkpoints[0].first_doc as u64).serialize_into_vec(buffer);
+        for checkpoint in &self.checkpoints {
+            let delta_doc = checkpoint.last_doc - checkpoint.first_doc + 1;
             VInt(delta_doc as u64).serialize_into_vec(buffer);
-            VInt(delta_val).serialize_into_vec(buffer);
+            VInt(checkpoint.end_offset - checkpoint.start_offset).serialize_into_vec(buffer);
         }
-        VInt(self.last_block_len).serialize_into_vec(buffer);
     }
 
     pub fn deserialize(&mut self, data: &mut &[u8]) -> io::Result<()> {
         if data.is_empty() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, ""));
         }
-        self.doc_offsets.clear();
-        let len = data[0] as usize;
-        *data = &data[1..];
-        let first_doc = VInt::deserialize_u64(data)? as DocId;
-        let first_offset = VInt::deserialize_u64(data)?;
-        self.doc_offsets.push((first_doc, first_offset));
-        let mut prev_doc = first_doc;
-        let mut prev_offset = first_offset;
-        for _ in 1..len {
-            let doc_delta = VInt::deserialize_u64(data)? as DocId;
-            let offset_delta = VInt::deserialize_u64(data)?;
-            let doc = prev_doc + doc_delta;
-            let offset = prev_offset + offset_delta;
-            self.doc_offsets.push((doc, offset));
-            prev_doc = doc;
-            prev_offset = offset;
+        self.checkpoints.clear();
+        let len = VInt::deserialize_u64(data)? as usize;
+        if len == 0 {
+            return Ok(());
         }
-        self.last_block_len = VInt::deserialize_u64(data)?;
+        let mut doc= VInt::deserialize_u64(data)? as DocId;
+        let mut start_offset = 0u64;
+        for _ in 0..len {
+            let num_docs = VInt::deserialize_u64(data)? as DocId;
+            let block_num_bytes = VInt::deserialize_u64(data)?;
+            self.checkpoints.push(Checkpoint {
+                first_doc: doc,
+                last_doc: doc + num_docs - 1,
+                start_offset,
+                end_offset: start_offset + block_num_bytes
+            });
+            doc += num_docs;
+            start_offset += block_num_bytes;
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::DocId;
+    use crate::store::index::Checkpoint;
     use crate::store::index::block::Block;
     use std::io;
 
@@ -106,17 +100,31 @@ mod tests {
     fn test_block_serialize() -> io::Result<()> {
         let mut block = Block::default();
         let offsets: Vec<u64> = (0..11).map(|i| i * i * i).collect();
+        let mut first_doc =0 ;
         for i in 0..10 {
-            block.push((i * i) as u32, offsets[i], offsets[i + 1]);
+            let last_doc = (i * i) as DocId;
+            block.push(Checkpoint {
+                first_doc,
+                last_doc: (i * i) as u32,
+                start_offset: offsets[i], 
+                end_offset: offsets[i + 1]
+            });
+            first_doc = last_doc + 1;
         }
         let mut buffer = Vec::new();
         block.serialize(&mut buffer);
         let mut block_deser = Block::default();
-        block_deser.push(1, 2, 3); // < check that value is erased before deser
+        let checkpoint = Checkpoint {
+            first_doc: 0,
+            last_doc: 1,
+            start_offset: 2,
+            end_offset: 3
+        };
+        block_deser.push(checkpoint); // < check that value is erased before deser
         let mut data = &buffer[..];
         block_deser.deserialize(&mut data)?;
         assert!(data.is_empty());
-        assert_eq!(&block.doc_offsets[..], &block_deser.doc_offsets[..]);
+        assert_eq!(&block.checkpoints[..], &block_deser.checkpoints[..]);
         Ok(())
     }
 

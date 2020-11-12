@@ -6,6 +6,7 @@ use crate::directory::{FileSlice, OwnedBytes};
 use crate::schema::Document;
 use crate::space_usage::StoreSpaceUsage;
 use crate::DocId;
+use crate::store::index::Checkpoint;
 use std::cell::RefCell;
 use std::io;
 use std::mem::size_of;
@@ -36,11 +37,11 @@ impl StoreReader {
         })
     }
 
-    pub(crate) fn iter_blocks<'a>(&'a self) -> impl Iterator<Item = (DocId, (u64, u64))> + 'a {
+    pub(crate) fn iter_blocks<'a>(&'a self) -> impl Iterator<Item = Checkpoint> + 'a {
         self.skip_index.cursor()
     }
 
-    fn block_offset(&self, doc_id: DocId) -> Option<(DocId, (u64, u64))> {
+    fn block_offset(&self, doc_id: DocId) -> Option<Checkpoint> {
         self.skip_index.seek(doc_id)
     }
 
@@ -73,12 +74,12 @@ impl StoreReader {
     /// It should not be called to score documents
     /// for instance.
     pub fn get(&self, doc_id: DocId) -> crate::Result<Document> {
-        let (first_doc_id, (start_offset, end_offset)) = self.block_offset(doc_id).unwrap(); // TODO
+        let checkpoint = self.block_offset(doc_id).unwrap(); // TODO
                                                                                              // .ok_or_else(err)?;
-        self.read_block(start_offset, end_offset)?;
+        self.read_block(checkpoint.start_offset, checkpoint.end_offset)?;
         let current_block_mut = self.current_block.borrow_mut();
         let mut cursor = &current_block_mut[..];
-        for _ in first_doc_id..doc_id {
+        for _ in checkpoint.first_doc..doc_id {
             let doc_length = VInt::deserialize(&mut cursor)?.val() as usize;
             cursor = &cursor[doc_length..];
         }

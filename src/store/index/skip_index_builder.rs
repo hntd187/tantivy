@@ -1,11 +1,11 @@
 use crate::common::{BinarySerializable, VInt};
 use crate::store::index::block::Block;
-use crate::store::index::PERIOD;
-use crate::DocId;
+use crate::store::index::{Checkpoint, PERIOD};
 use std::io;
 use std::io::Write;
 
 // Each skip contains iterator over pairs (last doc in block, offset to start of block).
+
 
 struct LayerBuilder {
     buffer: Vec<u8>,
@@ -24,27 +24,33 @@ impl LayerBuilder {
         }
     }
 
-    fn flush_block(&mut self) -> Option<(DocId, (u64, u64))> {
-        self.block.last_doc().map(|last_doc| {
+    /// If empty return None.
+    /// If not empty, serializes the block, clears it, and 
+    /// return a checkpoint.
+    fn flush_block(&mut self) -> Option<Checkpoint> {
+        self.block.first_last_doc().map(|(first_doc, last_doc)| {
             let start_offset = self.buffer.len() as u64;
             self.block.serialize(&mut self.buffer);
             let end_offset = self.buffer.len() as u64;
             self.block.clear();
-            (last_doc, (start_offset, end_offset))
+            Checkpoint {
+                first_doc,
+                last_doc,
+                start_offset,
+                end_offset
+            }
         })
     }
 
-    fn push(&mut self, doc: DocId, start_offset: u64, end_offset: u64) {
-        self.block.push(doc, start_offset, end_offset);
+    fn push(&mut self, checkpoint: Checkpoint) {
+        self.block.push(checkpoint);
     }
 
     fn insert(
         &mut self,
-        doc: DocId,
-        start_offset: u64,
-        end_offset: u64,
-    ) -> Option<(DocId, (u64, u64))> {
-        self.push(doc, start_offset, end_offset);
+        checkpoint: Checkpoint
+    ) -> Option<Checkpoint> {
+        self.push(checkpoint);
         let emit_skip_info = (self.block.len() % PERIOD) == 0;
         if emit_skip_info {
             self.flush_block()
@@ -71,13 +77,13 @@ impl SkipIndexBuilder {
         &mut self.layers[layer_id]
     }
 
-    pub fn insert(&mut self, doc: DocId, start_offset: u64, stop_offset: u64) {
-        let mut skip_pointer = Some((doc, (start_offset, stop_offset)));
+    pub fn insert(&mut self, checkpoint: Checkpoint) {
+        let mut skip_pointer = Some(checkpoint);
         for layer_id in 0.. {
-            if let Some((skip_doc_id, (start_offset, stop_offset))) = skip_pointer {
+            if let Some(checkpoint) = skip_pointer {
                 skip_pointer =
                     self.get_layer(layer_id)
-                        .insert(skip_doc_id, start_offset, stop_offset);
+                        .insert(checkpoint);
             } else {
                 break;
             }
@@ -87,8 +93,8 @@ impl SkipIndexBuilder {
     pub fn write<W: Write>(mut self, output: &mut W) -> io::Result<()> {
         let mut last_pointer = None;
         for skip_layer in self.layers.iter_mut() {
-            if let Some((first_doc, (start_offset, end_offset))) = last_pointer {
-                skip_layer.push(first_doc, start_offset, end_offset);
+            if let Some(checkpoint) = last_pointer {
+                skip_layer.push(checkpoint);
             }
             last_pointer = skip_layer.flush_block();
         }
