@@ -24,21 +24,27 @@ impl LayerBuilder {
         }
     }
 
-    fn flush_block(&mut self) -> Option<(DocId, u64)> {
+    fn flush_block(&mut self) -> Option<(DocId, (u64, u64))> {
         self.block.last_doc().map(|last_doc| {
-            let offset = self.buffer.len() as u64;
+            let start_offset = self.buffer.len() as u64;
             self.block.serialize(&mut self.buffer);
+            let end_offset = self.buffer.len() as u64;
             self.block.clear();
-            (last_doc, offset)
+            (last_doc, (start_offset, end_offset))
         })
     }
 
-    fn push(&mut self, doc: DocId, offset: u64) {
-        self.block.push(doc, offset);
+    fn push(&mut self, doc: DocId, start_offset: u64, end_offset: u64) {
+        self.block.push(doc, start_offset, end_offset);
     }
 
-    fn insert(&mut self, doc: DocId, value: u64) -> Option<(DocId, u64)> {
-        self.push(doc, value);
+    fn insert(
+        &mut self,
+        doc: DocId,
+        start_offset: u64,
+        end_offset: u64,
+    ) -> Option<(DocId, (u64, u64))> {
+        self.push(doc, start_offset, end_offset);
         let emit_skip_info = (self.block.len() % PERIOD) == 0;
         if emit_skip_info {
             self.flush_block()
@@ -65,11 +71,13 @@ impl SkipIndexBuilder {
         &mut self.layers[layer_id]
     }
 
-    pub fn insert(&mut self, doc: DocId, dest: u64) {
-        let mut skip_pointer = Some((doc, dest));
+    pub fn insert(&mut self, doc: DocId, start_offset: u64, stop_offset: u64) {
+        let mut skip_pointer = Some((doc, (start_offset, stop_offset)));
         for layer_id in 0.. {
-            if let Some((skip_doc_id, skip_offset)) = skip_pointer {
-                skip_pointer = self.get_layer(layer_id).insert(skip_doc_id, skip_offset);
+            if let Some((skip_doc_id, (start_offset, stop_offset))) = skip_pointer {
+                skip_pointer =
+                    self.get_layer(layer_id)
+                        .insert(skip_doc_id, start_offset, stop_offset);
             } else {
                 break;
             }
@@ -79,8 +87,8 @@ impl SkipIndexBuilder {
     pub fn write<W: Write>(mut self, output: &mut W) -> io::Result<()> {
         let mut last_pointer = None;
         for skip_layer in self.layers.iter_mut() {
-            if let Some((first_doc, offset)) = last_pointer {
-                skip_layer.push(first_doc, offset);
+            if let Some((first_doc, (start_offset, end_offset))) = last_pointer {
+                skip_layer.push(first_doc, start_offset, end_offset);
             }
             last_pointer = skip_layer.flush_block();
         }

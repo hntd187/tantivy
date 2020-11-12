@@ -5,12 +5,14 @@ use std::io;
 
 pub struct Block {
     pub doc_offsets: Vec<(DocId, u64)>,
+    pub last_block_len: u64,
 }
 
 impl Default for Block {
     fn default() -> Block {
         Block {
             doc_offsets: Vec::with_capacity(PERIOD),
+            last_block_len: 0u64,
         }
     }
 }
@@ -23,16 +25,26 @@ impl Block {
             .map(|(last_doc, _)| last_doc)
     }
 
-    pub fn push(&mut self, doc: DocId, offset: u64) {
-        self.doc_offsets.push((doc, offset));
+    pub fn push(&mut self, doc: DocId, start_offset: u64, end_offset: u64) {
+        self.doc_offsets.push((doc, start_offset));
+        self.last_block_len = end_offset - start_offset;
     }
 
     pub fn len(&self) -> usize {
         self.doc_offsets.len()
     }
 
-    pub fn get(&self, idx: usize) -> (u32, u64) {
-        self.doc_offsets[idx]
+    pub fn get(&self, idx: usize) -> (u32, (u64, u64)) {
+        let (first_doc, start_offset) = self.doc_offsets[idx];
+        if self.doc_offsets.len() > idx + 1 {
+            let end_offset = self.doc_offsets[idx + 1].1;
+            (first_doc, (start_offset, end_offset))
+        } else {
+            (
+                first_doc,
+                (start_offset, start_offset + self.last_block_len),
+            )
+        }
     }
 
     pub fn clear(&mut self) {
@@ -56,6 +68,7 @@ impl Block {
             VInt(delta_doc as u64).serialize_into_vec(buffer);
             VInt(delta_val).serialize_into_vec(buffer);
         }
+        VInt(self.last_block_len).serialize_into_vec(buffer);
     }
 
     pub fn deserialize(&mut self, data: &mut &[u8]) -> io::Result<()> {
@@ -79,6 +92,7 @@ impl Block {
             prev_doc = doc;
             prev_offset = offset;
         }
+        self.last_block_len = VInt::deserialize_u64(data)?;
         Ok(())
     }
 }
@@ -91,13 +105,14 @@ mod tests {
     #[test]
     fn test_block_serialize() -> io::Result<()> {
         let mut block = Block::default();
+        let offsets: Vec<u64> = (0..11).map(|i| i * i * i).collect();
         for i in 0..10 {
-            block.push((i * i) as u32, i * i * i);
+            block.push((i * i) as u32, offsets[i], offsets[i + 1]);
         }
         let mut buffer = Vec::new();
         block.serialize(&mut buffer);
         let mut block_deser = Block::default();
-        block_deser.push(1, 2); // < check that value is erased before deser
+        block_deser.push(1, 2, 3); // < check that value is erased before deser
         let mut data = &buffer[..];
         block_deser.deserialize(&mut data)?;
         assert!(data.is_empty());

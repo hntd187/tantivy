@@ -15,7 +15,7 @@ use std::sync::Arc;
 pub struct StoreReader {
     data: FileSlice,
     skip_index: Arc<SkipIndex>,
-    current_block_offset: RefCell<usize>,
+    current_block_offset: RefCell<u64>,
     current_block: RefCell<Vec<u8>>,
     space_usage: StoreSpaceUsage,
 }
@@ -30,17 +30,17 @@ impl StoreReader {
         Ok(StoreReader {
             data: data_file,
             skip_index: Arc::new(skip_index),
-            current_block_offset: RefCell::new(usize::max_value()),
+            current_block_offset: RefCell::new(u64::max_value()),
             current_block: RefCell::new(Vec::new()),
             space_usage,
         })
     }
 
-    pub(crate) fn iter_blocks<'a>(&'a self) -> impl Iterator<Item = (DocId, u64)> + 'a {
+    pub(crate) fn iter_blocks<'a>(&'a self) -> impl Iterator<Item = (DocId, (u64, u64))> + 'a {
         self.skip_index.cursor()
     }
 
-    fn block_offset(&self, doc_id: DocId) -> Option<(DocId, u64)> {
+    fn block_offset(&self, doc_id: DocId) -> Option<(DocId, (u64, u64))> {
         self.skip_index.seek(doc_id)
     }
 
@@ -48,19 +48,19 @@ impl StoreReader {
         self.data.read_bytes()
     }
 
-    fn compressed_block(&self, addr: usize) -> io::Result<OwnedBytes> {
-        let (block_len_bytes, block_body) = self.data.slice_from(addr).split(4);
-        let block_len = u32::deserialize(&mut block_len_bytes.read_bytes()?)?;
-        block_body.slice_to(block_len as usize).read_bytes()
+    fn compressed_block(&self, start_offset: u64, end_offset: u64) -> io::Result<OwnedBytes> {
+        self.data
+            .slice(start_offset as usize, end_offset as usize)
+            .read_bytes()
     }
 
-    fn read_block(&self, block_offset: usize) -> io::Result<()> {
-        if block_offset != *self.current_block_offset.borrow() {
+    fn read_block(&self, start_offset: u64, end_offset: u64) -> io::Result<()> {
+        if start_offset != *self.current_block_offset.borrow() {
             let mut current_block_mut = self.current_block.borrow_mut();
             current_block_mut.clear();
-            let compressed_block = self.compressed_block(block_offset)?;
+            let compressed_block = self.compressed_block(start_offset, end_offset)?;
             decompress(compressed_block.as_slice(), &mut current_block_mut)?;
-            *self.current_block_offset.borrow_mut() = block_offset;
+            *self.current_block_offset.borrow_mut() = start_offset;
         }
         Ok(())
     }
@@ -73,9 +73,9 @@ impl StoreReader {
     /// It should not be called to score documents
     /// for instance.
     pub fn get(&self, doc_id: DocId) -> crate::Result<Document> {
-        let (first_doc_id, block_offset) = self.block_offset(doc_id).unwrap(); // TODO
-                                                                               // .ok_or_else(err)?;
-        self.read_block(block_offset as usize)?;
+        let (first_doc_id, (start_offset, end_offset)) = self.block_offset(doc_id).unwrap(); // TODO
+                                                                                             // .ok_or_else(err)?;
+        self.read_block(start_offset, end_offset)?;
         let current_block_mut = self.current_block.borrow_mut();
         let mut cursor = &current_block_mut[..];
         for _ in first_doc_id..doc_id {

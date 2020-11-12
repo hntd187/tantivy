@@ -68,11 +68,9 @@ impl StoreWriter {
     pub fn stack(&mut self, store_reader: &StoreReader) -> io::Result<()> {
         if !self.current_block.is_empty() {
             self.write_and_compress_block()?;
-            self.offset_index_writer
-                .insert(self.doc, self.writer.written_bytes());
         }
-        let doc_offset = self.doc;
-        let start_offset = self.writer.written_bytes() as u64;
+        let doc_shift = self.doc;
+        let start_shift = self.writer.written_bytes() as u64;
 
         // just bulk write all of the block of the given reader.
         self.writer
@@ -80,22 +78,30 @@ impl StoreWriter {
 
         // concatenate the index of the `store_reader`, after translating
         // its start doc id and its start file offset.
-        for (last_doc_in_block, block_addr) in store_reader.iter_blocks() {
-            self.doc = doc_offset + last_doc_in_block as u32;
-            self.offset_index_writer
-                .insert(self.doc, start_offset + block_addr);
+        for (last_doc_in_block, (block_start_offset, block_end_offset)) in
+            store_reader.iter_blocks()
+        {
+            let last_doc = doc_shift + last_doc_in_block as u32;
+            self.offset_index_writer.insert(
+                last_doc,
+                start_shift + block_start_offset,
+                start_shift + block_end_offset,
+            );
+            self.doc = last_doc + 1;
         }
-        self.doc += 1;
         Ok(())
     }
 
     fn write_and_compress_block(&mut self) -> io::Result<()> {
+        assert!(self.doc > 0);
         self.intermediary_buffer.clear();
         compress(&self.current_block[..], &mut self.intermediary_buffer)?;
-        let block_offset = self.writer.written_bytes();
-        (self.intermediary_buffer.len() as u32).serialize(&mut self.writer)?;
+        let start_offset = self.writer.written_bytes();
         self.writer.write_all(&self.intermediary_buffer)?;
-        self.offset_index_writer.insert(self.doc - 1, block_offset);
+        let end_offset = self.writer.written_bytes();
+        let last_doc_in_block = self.doc - 1;
+        self.offset_index_writer
+            .insert(last_doc_in_block, start_offset, end_offset);
         self.current_block.clear();
         Ok(())
     }
